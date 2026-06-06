@@ -646,22 +646,31 @@ async function monitor() {
   if (process.env.TEST_NOTIFY === 'true') {
     log('TEST_NOTIFY mode — sending test Telegram message...');
     if (telegramToken && telegramChatId) {
-      const nowPerth = new Intl.DateTimeFormat('en-AU', {
-        timeZone: 'Australia/Perth',
-        dateStyle: 'full',
-        timeStyle: 'short',
-      }).format(new Date());
-      await sendTelegram(
-        telegramToken,
-        telegramChatId,
-        '<b>🧪 DOT PDA Monitor 测试通知</b>\n\n' +
-          '✅ Telegram 通知管道正常工作！\n\n' +
-          '系统状态：Cannington 考场每 10 分钟自动检查中\n' +
-          '当前结果：暂无空位\n\n' +
-          `📅 测试时间: ${nowPerth} (Perth)\n\n` +
-          '💡 <i>每天早上 9:00 会收到一次心跳确认系统运行正常。</i>'
-      );
-      log('Test notification sent successfully!');
+      try {
+        const nowPerth = new Intl.DateTimeFormat('en-AU', {
+          timeZone: 'Australia/Perth',
+          dateStyle: 'full',
+          timeStyle: 'short',
+        }).format(new Date());
+        await sendTelegram(
+          telegramToken,
+          telegramChatId,
+          '<b>🧪 DOT PDA Monitor 测试通知</b>\n\n' +
+            '✅ Telegram 通知管道正常工作！\n\n' +
+            '系统状态：Cannington 考场每 10 分钟自动检查中\n' +
+            '当前结果：暂无空位\n\n' +
+            `📅 测试时间: ${nowPerth} (Perth)\n\n` +
+            '💡 <i>每天早上 9:00 会收到一次心跳确认系统运行正常。</i>'
+        );
+        log('✅ Test notification sent successfully!');
+      } catch (err) {
+        log(`❌ Test notification failed: ${err.message}`);
+        log('');
+        log('故障排查：');
+        log('1. 在 Telegram 中给你的 Bot 发送 /start');
+        log('2. 用 @userinfobot 获取正确的 Chat ID');
+        log('3. 更新 GitHub Secret: gh secret set TELEGRAM_CHAT_ID --body "你的ID"');
+      }
     } else {
       log('Cannot send test — Telegram not configured');
     }
