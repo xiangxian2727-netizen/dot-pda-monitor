@@ -5,7 +5,8 @@
  * Cannington test centre has any available PDA (Practical Driving
  * Assessment) slots for a Class C (Manual) licence.
  *
- * Designed to work with browser state captured by login.js.
+ * Navigates through the Wicket-based PDA booking page, selects
+ * Cannington, sets a date range, and parses the results.
  *
  * Usage (local):
  *   DOT_COOKIES=$(cat cookies.json | base64) \
@@ -19,11 +20,11 @@ const fs = require('fs');
 const path = require('path');
 
 // ── Config ──────────────────────────────────────────────────────────
-const PDA_ENTRY_URL =
-  'https://online.transport.wa.gov.au/pdabooking/manage/';
+const PDA_BOOKING_URL =
+  'https://online.transport.wa.gov.au/pdabooking/manage/wicket/page?1';
 
-const CANNINGTON = 'Cannington';
-const LICENCE_CLASS = 'C'; // Manual
+const CANNINGTON_SITE_CODE = 'CAN';
+const CANNINGTON_LABEL = 'Cannington';
 
 // Page expiry / session invalid indicators
 const SESSION_EXPIRED_MARKERS = [
@@ -46,6 +47,25 @@ const LOGIN_FORM_MARKERS = [
   'loginForm:password',
 ];
 
+// Known error messages that mean "no slots available"
+const NO_SLOTS_MARKERS = [
+  'no bookings available',
+  'no available bookings',
+  'No available',
+  'no appointments available',
+  'No times available',
+];
+
+// Known success indicators — text that appears when slots ARE available
+const SLOTS_AVAILABLE_MARKERS = [
+  'Available times',
+  'available times',
+  'Select a time',
+  'select a time',
+  'Choose a time',
+  'Please select a booking time',
+];
+
 const SCREENSHOTS_DIR = path.join(__dirname, 'screenshots');
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -63,6 +83,16 @@ function ensureDir(dir) {
 }
 
 /**
+ * Format a date as dd/mm/yyyy (Australian format used by DOT).
+ */
+function formatDateAU(date) {
+  const d = String(date.getDate()).padStart(2, '0');
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const y = date.getFullYear();
+  return `${d}/${m}/${y}`;
+}
+
+/**
  * Send a message via Telegram Bot API.
  * Uses Node.js built-in fetch with retry support.
  */
@@ -77,7 +107,6 @@ async function sendTelegram(token, chatId, text) {
 
   let lastError = null;
 
-  // Retry up to 2 times with increasing delays
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       if (attempt > 0) {
@@ -104,7 +133,6 @@ async function sendTelegram(token, chatId, text) {
       lastError = new Error(`Telegram API ${response.status}: ${data}`);
     } catch (err) {
       lastError = err;
-      // If it's a DNS/network error, log and retry
       log(`Telegram attempt ${attempt + 1} failed: ${err.message}`);
     }
   }
@@ -112,11 +140,8 @@ async function sendTelegram(token, chatId, text) {
   throw lastError || new Error('Telegram send failed after retries');
 }
 
-// ── Session check ───────────────────────────────────────────────────
+// ── Session check helpers ───────────────────────────────────────────
 
-/**
- * Check if the current page shows that the session has expired.
- */
 async function isSessionExpired(page) {
   try {
     const bodyText = await page.evaluate(() => document.body.innerText);
@@ -124,29 +149,17 @@ async function isSessionExpired(page) {
       bodyText.toLowerCase().includes(marker.toLowerCase())
     );
   } catch (_) {
-    return true; // Assume expired if we can't check
+    return true;
   }
 }
 
-/**
- * Check if the current page is a real login page (not a false positive
- * from "DoTDirect" appearing in headers/footers).
- *
- * Uses two checks:
- *   1. URL contains a known login path
- *   2. Page HTML contains actual JSF login form fields
- */
 async function isLoginPage(page) {
   try {
     const url = page.url();
-
-    // Quick URL check — if we're NOT on a known login URL, it's not a login page
     const onLoginUrl = LOGIN_PAGE_URLS.some((path) => url.includes(path));
     if (!onLoginUrl) {
       return false;
     }
-
-    // Confirm by checking for actual login form fields
     const html = await page.content();
     return LOGIN_FORM_MARKERS.every((marker) => html.includes(marker));
   } catch (_) {
@@ -154,12 +167,8 @@ async function isLoginPage(page) {
   }
 }
 
-// ── Page analysis helpers ───────────────────────────────────────────
+// ── Page helpers ────────────────────────────────────────────────────
 
-/**
- * Extract all visible text from the page and log it.
- * Useful for debugging when running headlessly.
- */
 async function logPageSummary(page) {
   try {
     const title = await page.title();
@@ -167,11 +176,9 @@ async function logPageSummary(page) {
     log(`Page title: "${title}"`);
     log(`Page URL: ${url}`);
 
-    // Extract main content text (first 500 chars)
     const bodyText = await page.evaluate(() => {
-      // Try to get main content area
       const main = document.querySelector(
-        'main, #content, .content, [role="main"]'
+        'main, #content, .content, [role="main"], .container-center'
       );
       const el = main || document.body;
       return el.innerText.substring(0, 500);
@@ -182,9 +189,6 @@ async function logPageSummary(page) {
   }
 }
 
-/**
- * Take a timestamped screenshot for debugging.
- */
 async function takeDebugScreenshot(page, name) {
   try {
     ensureDir(SCREENSHOTS_DIR);
@@ -199,67 +203,207 @@ async function takeDebugScreenshot(page, name) {
   }
 }
 
-// ── Availability extraction ─────────────────────────────────────────
+// ── Wicket form interaction ─────────────────────────────────────────
 
 /**
- * Try to extract available time slots from the page.
- *
- * Since we don't know the exact page structure yet, this function
- * makes reasonable guesses based on common DOT / govt booking patterns.
- *
- * Returns: { found: boolean, slots: string[], rawText: string }
+ * Wait for Wicket AJAX to complete.
+ * Wicket adds/removes indicator elements during AJAX calls.
  */
-async function extractAvailability(page) {
-  const result = { found: false, slots: [], rawText: '' };
+async function waitForWicketAjax(page, timeoutMs = 10000) {
+  try {
+    // Wait for any visible AJAX indicator to disappear
+    await page.waitForFunction(() => {
+      const indicators = document.querySelectorAll('.wicket-ajax-indicator');
+      for (const el of indicators) {
+        if (el.style.display !== 'none' && el.offsetParent !== null) {
+          return false;
+        }
+      }
+      return true;
+    }, { timeout: timeoutMs });
+    // Small extra wait for DOM updates to settle
+    await page.waitForTimeout(500);
+  } catch (_) {
+    // Timeout is OK — the AJAX might have completed before we checked
+    log('  (AJAX wait timeout or already complete)');
+  }
+}
+
+/**
+ * Select Metro region radio button and wait for AJAX.
+ */
+async function selectMetroRegion(page) {
+  log('Selecting Metro region...');
+  try {
+    const metroRadio = page.locator('#id1-METRO');
+    if (await metroRadio.isVisible({ timeout: 3000 }).catch(() => false)) {
+      const isChecked = await metroRadio.isChecked();
+      if (!isChecked) {
+        await metroRadio.click();
+        log('  Clicked Metro radio — waiting for AJAX');
+        await waitForWicketAjax(page);
+        log('  Metro region selected');
+      } else {
+        log('  Metro already selected');
+      }
+    } else {
+      log('  Metro radio not found — may already be on correct page');
+    }
+  } catch (err) {
+    log(`  Metro selection skipped: ${err.message}`);
+  }
+}
+
+/**
+ * Check the Cannington checkbox and wait for AJAX.
+ * Returns true if the checkbox was found and checked.
+ */
+async function selectCannington(page) {
+  log('Selecting Cannington site...');
+  try {
+    const canningtonCheckbox = page.locator(
+      `#id2-searchBookingContainer:siteList_${CANNINGTON_SITE_CODE}`
+    );
+
+    if (!(await canningtonCheckbox.isVisible({ timeout: 3000 }).catch(() => false))) {
+      log('  WARNING: Cannington checkbox not found!');
+      return false;
+    }
+
+    const isChecked = await canningtonCheckbox.isChecked();
+    if (!isChecked) {
+      await canningtonCheckbox.click();
+      log('  Clicked Cannington checkbox — waiting for AJAX');
+      await waitForWicketAjax(page);
+      log('  Cannington selected');
+    } else {
+      log('  Cannington already selected');
+    }
+    return true;
+  } catch (err) {
+    log(`  Cannington selection error: ${err.message}`);
+    return false;
+  }
+}
+
+/**
+ * Enter date range: from today to today + 6 months.
+ * Uses the datePicker inputs (fromDateInput / toDateInput).
+ */
+async function setDateRange(page) {
+  log('Setting date range...');
+  try {
+    const today = new Date();
+    const sixMonths = new Date(today);
+    sixMonths.setMonth(sixMonths.getMonth() + 6);
+
+    const fromDateStr = formatDateAU(today);
+    const toDateStr = formatDateAU(sixMonths);
+
+    log(`  Date range: ${fromDateStr} → ${toDateStr}`);
+
+    // Fill "from" date
+    const fromInput = page.locator('#fromDateInput');
+    if (await fromInput.isVisible({ timeout: 3000 }).catch(() => false)) {
+      await fromInput.click();
+      await fromInput.fill('');
+      await fromInput.type(fromDateStr, { delay: 50 });
+      log('  From date entered — waiting for AJAX');
+      await waitForWicketAjax(page);
+    } else {
+      log('  WARNING: fromDateInput not found');
+    }
+
+    // Fill "to" date
+    const toInput = page.locator('#toDateInput');
+    if (await toInput.isVisible({ timeout: 3000 }).catch(() => false)) {
+      await toInput.click();
+      await toInput.fill('');
+      await toInput.type(toDateStr, { delay: 50 });
+      log('  To date entered — waiting for AJAX');
+      await waitForWicketAjax(page);
+    } else {
+      log('  WARNING: toDateInput not found');
+    }
+  } catch (err) {
+    log(`  Date range error: ${err.message}`);
+  }
+}
+
+/**
+ * Click the Search button and wait for results.
+ */
+async function clickSearch(page) {
+  log('Clicking Search...');
+  try {
+    const searchBtn = page.locator(
+      'input[name="searchBookingContainer:search"]'
+    );
+    if (await searchBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
+      await searchBtn.click();
+      log('  Search clicked — waiting for results...');
+      // Wait longer for search results — can take several seconds
+      await waitForWicketAjax(page, 15000);
+      // Additional wait for result rendering
+      await page.waitForTimeout(2000);
+      log('  Search complete');
+    } else {
+      log('  WARNING: Search button not found');
+    }
+  } catch (err) {
+    log(`  Search click error: ${err.message}`);
+  }
+}
+
+// ── Result parsing ──────────────────────────────────────────────────
+
+/**
+ * Parse the page after search to determine if slots are available.
+ *
+ * Known page structure:
+ *   - No slots: <span class="feedbackPanelERROR">Sorry, there are no
+ *     bookings available for the date requested...</span>
+ *   - Slots available: a table or list of available date/time options
+ *     with radio buttons to select a time
+ *
+ * Returns: { found: boolean, slots: string[], summary: string }
+ */
+async function parseResults(page) {
+  const result = { found: false, slots: [], summary: '' };
 
   try {
     const bodyText = await page.evaluate(() => document.body.innerText);
-    result.rawText = bodyText.substring(0, 2000);
+    result.summary = bodyText.substring(0, 2000);
 
-    // ── Pattern 1: Look for date/time patterns (e.g. "Monday 20 June 2026") ──
+    // ── Check for "no slots" error messages ──
+    const hasNoSlotsMessage = NO_SLOTS_MARKERS.some((marker) =>
+      bodyText.toLowerCase().includes(marker.toLowerCase())
+    );
+
+    if (hasNoSlotsMessage) {
+      log('  → Page indicates NO slots available');
+      result.slots.push('DOT reports: no bookings available for this date range');
+      return result;
+    }
+
+    // ── Check for positive availability indicators ──
+    const hasAvailableIndicator = SLOTS_AVAILABLE_MARKERS.some((marker) =>
+      bodyText.toLowerCase().includes(marker.toLowerCase())
+    );
+
+    // ── Look for date patterns in the results ──
     const datePattern =
       /\b(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s+\d{1,2}\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}\b/gi;
     const dateMatches = bodyText.match(datePattern) || [];
 
-    // ── Pattern 2: Look for time patterns (e.g. "10:15 AM", "2:30 PM") ──
+    // ── Look for time patterns ──
     const timePattern = /\b\d{1,2}:\d{2}\s*(AM|PM|am|pm)\b/g;
     const timeMatches = bodyText.match(timePattern) || [];
 
-    // ── Pattern 3: Explicit "available" or "no available" indicators ──
-    const noAvailabilityPattern =
-      /no (available|appointment|slot|booking|vacanc)/i;
-    const hasAvailabilityPattern =
-      /(available|select|choose|book)\s+(appointment|slot|time|date|session)/i;
-
-    const hasNoAvailability = noAvailabilityPattern.test(bodyText);
-    const hasAvailability = hasAvailabilityPattern.test(bodyText);
-
-    // ── Pattern 4: Check for Cannington mention ──
-    const canningtonMention = bodyText
-      .toLowerCase()
-      .includes(CANNINGTON.toLowerCase());
-
-    // ── Pattern 5: Look for table rows with booking times ──
-    const tableSlots = await page.evaluate(() => {
-      const slots = [];
-      // Look for table rows that might contain booking slots
-      const rows = document.querySelectorAll('tr');
-      for (const row of rows) {
-        const text = row.innerText.trim();
-        if (
-          text &&
-          /\d{1,2}:\d{2}/.test(text) &&
-          text.length < 200
-        ) {
-          slots.push(text);
-        }
-      }
-      return slots;
-    });
-
-    // ── Pattern 6: Radio buttons / checkboxes for time selection ──
+    // ── Look for radio/checkbox labels (slot selection options) ──
     const selectableOptions = await page.evaluate(() => {
       const options = [];
+      // Radio button labels in the booking time selection area
       const labels = document.querySelectorAll(
         'label:has(input[type="radio"]), label:has(input[type="checkbox"])'
       );
@@ -272,37 +416,56 @@ async function extractAvailability(page) {
       return options;
     });
 
+    // ── Look for table rows with booking info ──
+    const tableSlots = await page.evaluate(() => {
+      const slots = [];
+      const rows = document.querySelectorAll('tr');
+      for (const row of rows) {
+        const text = row.innerText.trim();
+        if (text && /\d{1,2}:\d{2}/.test(text) && text.length < 200) {
+          slots.push(text);
+        }
+      }
+      return slots;
+    });
+
     // ── Assemble findings ──
-    if (dateMatches.length > 0 || timeMatches.length > 0 || tableSlots.length > 0 || selectableOptions.length > 0) {
-      result.found = true;
+    if (dateMatches.length > 0) {
+      result.slots.push(`Dates: ${dateMatches.join(', ')}`);
+    }
+    if (timeMatches.length > 0) {
+      result.slots.push(`Times: ${timeMatches.join(', ')}`);
+    }
+    for (const slot of tableSlots) {
+      result.slots.push(`Row: ${slot}`);
+    }
+    for (const opt of selectableOptions) {
+      result.slots.push(`Option: ${opt}`);
+    }
 
-      // Combine date and time information
-      if (dateMatches.length > 0) {
-        result.slots.push(`Dates found: ${dateMatches.join(', ')}`);
-      }
-      if (timeMatches.length > 0) {
-        result.slots.push(`Times found: ${timeMatches.join(', ')}`);
-      }
-      for (const slot of tableSlots) {
-        result.slots.push(`Table row: ${slot}`);
-      }
-      for (const opt of selectableOptions) {
-        result.slots.push(`Option: ${opt}`);
+    if (hasAvailableIndicator || dateMatches.length > 0 || timeMatches.length > 0 || selectableOptions.length > 0 || tableSlots.length > 0) {
+      if (dateMatches.length > 0 || selectableOptions.length > 0 || tableSlots.length > 0) {
+        result.found = true;
+        log('  → POTENTIAL SLOTS DETECTED!');
+      } else if (hasAvailableIndicator && !hasNoSlotsMessage) {
+        result.found = true;
+        log('  → Availability indicators found (but no specific dates extracted)');
       }
     }
 
-    // Explicit "no availability" message
-    if (hasNoAvailability) {
-      result.found = false;
-      result.slots.push('Site indicates no available slots');
+    if (!result.found) {
+      log('  → No available slots detected');
     }
 
-    // Cannington info
-    if (canningtonMention) {
-      result.slots.push('(Cannington mentioned on page)');
+    // Check for Cannington mention (sanity check)
+    const canningtonMentioned = bodyText
+      .toLowerCase()
+      .includes(CANNINGTON_LABEL.toLowerCase());
+    if (canningtonMentioned) {
+      result.slots.push('(Cannington is referenced on the page)');
     }
   } catch (err) {
-    log(`Error extracting availability: ${err.message}`);
+    log(`Error parsing results: ${err.message}`);
   }
 
   return result;
@@ -315,7 +478,7 @@ function buildTelegramMessage(availability) {
 
   if (availability.slots.length > 0) {
     lines.push('<b>发现以下内容：</b>');
-    for (const slot of availability.slots.slice(0, 10)) {
+    for (const slot of availability.slots.slice(0, 15)) {
       lines.push(`  • ${slot}`);
     }
   } else {
@@ -324,10 +487,13 @@ function buildTelegramMessage(availability) {
 
   lines.push('');
   lines.push(
-    '🔗 <a href="https://online.transport.wa.gov.au/pdabooking/manage/">立即查看预约</a>'
+    '🔗 <a href="https://online.transport.wa.gov.au/pdabooking/manage/wicket/page?1">立即查看预约</a>'
   );
   lines.push('');
-  lines.push(`📅 检测时间: ${new Date().toLocaleString('en-AU', { timeZone: 'Australia/Perth' })} (Perth时间)`);
+  const perthTime = new Date().toLocaleString('en-AU', {
+    timeZone: 'Australia/Perth',
+  });
+  lines.push(`📅 检测时间: ${perthTime} (Perth时间)`);
 
   return lines.join('\n');
 }
@@ -377,7 +543,8 @@ async function monitor() {
   });
 
   const context = await browser.newContext({
-    userAgent: browserState.userAgent ||
+    userAgent:
+      browserState.userAgent ||
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     viewport: { width: 1280, height: 800 },
   });
@@ -393,9 +560,15 @@ async function monitor() {
   const page = await context.newPage();
 
   // Restore localStorage if available
-  if (browserState.localStorage && Object.keys(browserState.localStorage).length > 0) {
+  if (
+    browserState.localStorage &&
+    Object.keys(browserState.localStorage).length > 0
+  ) {
     try {
-      await page.goto(PDA_ENTRY_URL, { waitUntil: 'domcontentloaded', timeout: 20000 });
+      await page.goto(PDA_BOOKING_URL, {
+        waitUntil: 'domcontentloaded',
+        timeout: 20000,
+      });
       await page.evaluate((data) => {
         for (const [key, value] of Object.entries(data)) {
           window.localStorage.setItem(key, value);
@@ -408,20 +581,20 @@ async function monitor() {
   }
 
   try {
-    // ── Navigate to PDA booking ──
-    log(`Navigating to: ${PDA_ENTRY_URL}`);
-    await page.goto(PDA_ENTRY_URL, {
+    // ── Step 1: Navigate to PDA booking page ──
+    log(`Navigating to: ${PDA_BOOKING_URL}`);
+    await page.goto(PDA_BOOKING_URL, {
       waitUntil: 'networkidle',
       timeout: 30000,
     });
 
-    // Wait a bit for any redirects / JS to settle
+    // Wait for Wicket page to fully initialize
     await page.waitForTimeout(3000);
 
     const currentUrl = page.url();
     log(`Landed on: ${currentUrl}`);
 
-    // ── Check session status ──
+    // ── Step 2: Check session status ──
     const expired = await isSessionExpired(page);
     const onLoginPage = await isLoginPage(page);
 
@@ -463,33 +636,110 @@ async function monitor() {
         }
       }
     } else {
-      // Session is valid — analyze the page
+      // ── Step 3: Session valid — interact with booking form ──
       log('Session appears valid');
       await logPageSummary(page);
 
-      // Take a screenshot for debugging
-      await takeDebugScreenshot(page, 'booking-page');
+      // Check if we're on a page that has the PDA booking form
+      const hasBookingForm = await page.evaluate(() => {
+        return (
+          !!document.querySelector('#fromDateInput') ||
+          !!document.querySelector('input[name="searchBookingContainer:search"]')
+        );
+      });
 
-      // ── Try to find Cannington availability ──
-      const availability = await extractAvailability(page);
+      if (hasBookingForm) {
+        log('PDA booking form detected — proceeding with search');
 
-      log(`Availability check: found=${availability.found}, slots=${availability.slots.length}`);
+        // Select Metro region
+        await selectMetroRegion(page);
 
-      if (availability.found) {
-        log('POTENTIAL SLOTS FOUND!');
-        log(JSON.stringify(availability.slots, null, 2));
+        // Select Cannington
+        const canningtonFound = await selectCannington(page);
 
-        if (telegramToken && telegramChatId) {
+        if (!canningtonFound) {
+          // If Cannington checkbox not found, the page might need to load sites first
+          log('Cannington not found — trying to refresh site list via region toggle');
+          // Try toggling region to trigger site list reload
           try {
-            const message = buildTelegramMessage(availability);
-            await sendTelegram(telegramToken, telegramChatId, message);
-            log('Sent availability notification via Telegram');
-          } catch (err) {
-            log(`Failed to send Telegram: ${err.message}`);
+            const regionalRadio = page.locator('#id1-REGIONAL');
+            if (await regionalRadio.isVisible({ timeout: 2000 }).catch(() => false)) {
+              await regionalRadio.click();
+              await waitForWicketAjax(page);
+              // Toggle back to Metro
+              const metroRadio = page.locator('#id1-METRO');
+              await metroRadio.click();
+              await waitForWicketAjax(page);
+              // Try Cannington again
+              await selectCannington(page);
+            }
+          } catch (_) {
+            log('  Could not toggle region to refresh sites');
           }
         }
+
+        // Set date range
+        await setDateRange(page);
+
+        // Click Search
+        await clickSearch(page);
+
+        // Take a screenshot after search
+        await takeDebugScreenshot(page, 'search-results');
+
+        // Log page state after search
+        await logPageSummary(page);
+
+        // ── Step 4: Parse results ──
+        const availability = await parseResults(page);
+
+        log(
+          `Availability check: found=${availability.found}, slots=${availability.slots.length}`
+        );
+
+        if (availability.found) {
+          log('SLOTS FOUND!');
+          log(JSON.stringify(availability.slots, null, 2));
+
+          if (telegramToken && telegramChatId) {
+            try {
+              const message = buildTelegramMessage(availability);
+              await sendTelegram(telegramToken, telegramChatId, message);
+              log('Sent availability notification via Telegram');
+            } catch (err) {
+              log(`Failed to send Telegram: ${err.message}`);
+            }
+          }
+        } else {
+          log('No available slots for Cannington');
+        }
       } else {
-        log('No available slots detected for Cannington');
+        // We're on a page but it doesn't have the booking form
+        log('WARNING: Booking form not found on this page');
+        log('This might be an intermediary page — taking screenshot for analysis');
+        await takeDebugScreenshot(page, 'no-booking-form');
+        await logPageSummary(page);
+
+        // Try to click through to the booking page if we see relevant links
+        const bodyText = await page.evaluate(() => document.body.innerText);
+        if (
+          bodyText.includes('Driving Instructor') ||
+          bodyText.includes('driving instructor')
+        ) {
+          log('On driving instructor portal — session may not support learner booking');
+          if (telegramToken && telegramChatId) {
+            try {
+              await sendTelegram(
+                telegramToken,
+                telegramChatId,
+                '<b>⚠️ DOT Monitor 进入了教练页面</b>\n\n' +
+                  'Session 可能没有正确保存学员入口的 cookies。\n' +
+                  '请在 Mac 上重新运行 login.js 并确保通过 DoTDirect 登录。\n\n' +
+                  '流程: DoTDirect → Driver\'s License → PDA Bookings → Book PDA'
+              );
+            } catch (_) {}
+          }
+        }
       }
     }
   } catch (err) {
@@ -508,7 +758,7 @@ async function monitor() {
       }
     }
 
-    throw err; // Re-throw to fail the GitHub Actions job
+    throw err;
   } finally {
     await browser.close();
   }
