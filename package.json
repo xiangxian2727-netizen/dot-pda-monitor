@@ -1,0 +1,16 @@
+{
+  "name": "dot-pda-monitor",
+  "version": "1.0.0",
+  "description": "Monitor WA DOT PDA booking system for available slots at Cannington test center",
+  "private": true,
+  "scripts": {
+    "login": "node login.js",
+    "monitor": "node monitor.js"
+  },
+  "dependencies": {
+    "playwright": "^1.52.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
