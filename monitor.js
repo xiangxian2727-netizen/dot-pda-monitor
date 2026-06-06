@@ -230,44 +230,92 @@ async function waitForWicketAjax(page, timeoutMs = 10000) {
 }
 
 /**
- * Select Metro region radio button and wait for AJAX.
+ * Select Metro region radio button and wait for the site list to populate.
+ *
+ * Wicket's attachChoiceHandlers only fires AJAX when a radio is CLICKED.
+ * On page load, Metro is already checked but no AJAX fires, leaving the
+ * #id2 site list empty. We force-click Metro (even if checked) to trigger
+ * the AJAX that populates the site checkboxes.
  */
 async function selectMetroRegion(page) {
   log('Selecting Metro region...');
   try {
     const metroRadio = page.locator('#id1-METRO');
-    if (await metroRadio.isVisible({ timeout: 3000 }).catch(() => false)) {
-      const isChecked = await metroRadio.isChecked();
-      if (!isChecked) {
-        await metroRadio.click();
-        log('  Clicked Metro radio — waiting for AJAX');
-        await waitForWicketAjax(page);
-        log('  Metro region selected');
-      } else {
-        log('  Metro already selected');
-      }
-    } else {
-      log('  Metro radio not found — may already be on correct page');
+    if (!(await metroRadio.isVisible({ timeout: 3000 }).catch(() => false))) {
+      log('  Metro radio not found');
+      return;
+    }
+
+    // Always click to trigger Wicket AJAX that populates site list
+    await metroRadio.click();
+    log('  Clicked Metro radio — waiting for site list AJAX...');
+    await waitForWicketAjax(page);
+
+    // Wait for checkboxes to actually appear in #id2
+    try {
+      await page.waitForFunction(() => {
+        const id2 = document.getElementById('id2');
+        if (!id2) return false;
+        const checkboxes = id2.querySelectorAll('input[type="checkbox"]');
+        return checkboxes.length > 0;
+      }, { timeout: 8000 });
+      log('  Site checkboxes populated');
+    } catch (_) {
+      log('  WARNING: Site checkboxes did not appear after region select');
+      // Dump #id2 content for debugging
+      try {
+        const id2html = await page.evaluate(() => {
+          const el = document.getElementById('id2');
+          return el ? el.innerHTML.substring(0, 300) : '#id2 not found';
+        });
+        log(`  #id2 content: ${id2html}`);
+      } catch (_) {}
     }
   } catch (err) {
-    log(`  Metro selection skipped: ${err.message}`);
+    log(`  Metro selection error: ${err.message}`);
   }
 }
 
 /**
  * Check the Cannington checkbox and wait for AJAX.
+ * Tries multiple selector strategies since Wicket IDs contain colons.
  * Returns true if the checkbox was found and checked.
  */
 async function selectCannington(page) {
   log('Selecting Cannington site...');
   try {
-    // Use attribute selector — Wicket IDs contain colons that break CSS
-    const canningtonCheckbox = page.locator(
+    // Strategy 1: Attribute selector with exact ID
+    let canningtonCheckbox = page.locator(
       `[id="id2-searchBookingContainer:siteList_${CANNINGTON_SITE_CODE}"]`
     );
 
-    if (!(await canningtonCheckbox.isVisible({ timeout: 3000 }).catch(() => false))) {
-      log('  WARNING: Cannington checkbox not found!');
+    let found = await canningtonCheckbox.isVisible({ timeout: 2000 }).catch(() => false);
+
+    // Strategy 2: Find by label text "Cannington"
+    if (!found) {
+      log('  Trying label-based selector...');
+      // Click the label for Cannington, which should check the associated checkbox
+      const canningtonLabel = page.locator('label', { hasText: CANNINGTON_LABEL });
+      if (await canningtonLabel.isVisible({ timeout: 2000 }).catch(() => false)) {
+        await canningtonLabel.click();
+        log('  Clicked Cannington label — waiting for AJAX');
+        await waitForWicketAjax(page);
+        log('  Cannington selected via label');
+        return true;
+      }
+    }
+
+    // Strategy 3: Look for any checkbox whose value is CAN
+    if (!found) {
+      log('  Trying value-based selector...');
+      canningtonCheckbox = page.locator(
+        `input[type="checkbox"][value="${CANNINGTON_SITE_CODE}"]`
+      );
+      found = await canningtonCheckbox.isVisible({ timeout: 2000 }).catch(() => false);
+    }
+
+    if (!found) {
+      log('  WARNING: Cannington checkbox not found by any strategy');
       return false;
     }
 
@@ -652,32 +700,11 @@ async function monitor() {
       if (hasBookingForm) {
         log('PDA booking form detected — proceeding with search');
 
-        // Select Metro region
+        // Select Metro region (force-click to trigger Wicket AJAX)
         await selectMetroRegion(page);
 
-        // Select Cannington
-        const canningtonFound = await selectCannington(page);
-
-        if (!canningtonFound) {
-          // If Cannington checkbox not found, the page might need to load sites first
-          log('Cannington not found — trying to refresh site list via region toggle');
-          // Try toggling region to trigger site list reload
-          try {
-            const regionalRadio = page.locator('#id1-REGIONAL');
-            if (await regionalRadio.isVisible({ timeout: 2000 }).catch(() => false)) {
-              await regionalRadio.click();
-              await waitForWicketAjax(page);
-              // Toggle back to Metro
-              const metroRadio = page.locator('#id1-METRO');
-              await metroRadio.click();
-              await waitForWicketAjax(page);
-              // Try Cannington again
-              await selectCannington(page);
-            }
-          } catch (_) {
-            log('  Could not toggle region to refresh sites');
-          }
-        }
+        // Select Cannington site
+        await selectCannington(page);
 
         // Set date range
         await setDateRange(page);

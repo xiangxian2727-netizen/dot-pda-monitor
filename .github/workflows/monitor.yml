@@ -33,10 +33,10 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: node monitor.js
 
-      - name: Upload screenshots (on failure)
-        if: failure()
+      - name: Upload screenshots
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: debug-screenshots
           path: screenshots/
-          retention-days: 7
+          retention-days: 3
