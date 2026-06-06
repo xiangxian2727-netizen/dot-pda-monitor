@@ -362,13 +362,16 @@ async function setDateRange(page) {
 
     log(`  Date range: ${fromDateStr} → ${toDateStr}`);
 
-    // Fill "from" date — use fill() then dispatch change event for Wicket
+    // Fill "from" date — use type() to simulate real typing
+    // (fill() doesn't trigger Wicket's date validation properly)
     const fromInput = page.locator('#fromDateInput');
     if (await fromInput.isVisible({ timeout: 3000 }).catch(() => false)) {
       await fromInput.click();
-      await fromInput.fill(fromDateStr);
-      // Trigger Wicket onchange AJAX
-      await fromInput.dispatchEvent('change');
+      await fromInput.fill('');
+      await page.waitForTimeout(200);
+      await fromInput.type(fromDateStr, { delay: 80 });
+      // Tab away to trigger onchange
+      await fromInput.press('Tab');
       log('  From date entered — waiting for AJAX');
       await waitForWicketAjax(page);
     } else {
@@ -379,8 +382,10 @@ async function setDateRange(page) {
     const toInput = page.locator('#toDateInput');
     if (await toInput.isVisible({ timeout: 3000 }).catch(() => false)) {
       await toInput.click();
-      await toInput.fill(toDateStr);
-      await toInput.dispatchEvent('change');
+      await toInput.fill('');
+      await page.waitForTimeout(200);
+      await toInput.type(toDateStr, { delay: 80 });
+      await toInput.press('Tab');
       log('  To date entered — waiting for AJAX');
       await waitForWicketAjax(page);
     } else {
