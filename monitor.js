@@ -85,13 +85,23 @@ function ensureDir(dir) {
 }
 
 /**
- * Format a date as dd/mm/yyyy (Australian format used by DOT).
+ * Format a date as dd/mm/yyyy in Australia/Perth timezone.
+ * DOT servers run on Perth time — dates must be Perth-local.
  */
 function formatDateAU(date) {
-  const d = String(date.getDate()).padStart(2, '0');
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const y = date.getFullYear();
-  return `${d}/${m}/${y}`;
+  // Use Intl.DateTimeFormat with Perth timezone to get correct day/month/year
+  const parts = new Intl.DateTimeFormat('en-AU', {
+    timeZone: 'Australia/Perth',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+  }).formatToParts(date);
+
+  const day = parts.find((p) => p.type === 'day').value;
+  const month = parts.find((p) => p.type === 'month').value;
+  const year = parts.find((p) => p.type === 'year').value;
+
+  return `${day}/${month}/${year}`;
 }
 
 /**
