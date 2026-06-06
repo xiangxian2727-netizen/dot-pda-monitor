@@ -49,11 +49,13 @@ const LOGIN_FORM_MARKERS = [
 
 // Known error messages that mean "no slots available"
 const NO_SLOTS_MARKERS = [
+  'no bookings available for the date requested',
   'no bookings available',
   'no available bookings',
-  'No available',
   'no appointments available',
   'No times available',
+  'There are no available',
+  'There is no available',
 ];
 
 // Known success indicators — text that appears when slots ARE available
@@ -176,14 +178,20 @@ async function logPageSummary(page) {
     log(`Page title: "${title}"`);
     log(`Page URL: ${url}`);
 
+    // Target DOT form containers specifically — .container-center
+    // only gets the outer header wrapper
     const bodyText = await page.evaluate(() => {
-      const main = document.querySelector(
-        'main, #content, .content, [role="main"], .container-center'
+      // Try DOT-specific containers first, then fall back to body
+      const form = document.querySelector(
+        '.licensing-big-form, #requestForm, form, [id*="searchBooking"]'
       );
-      const el = main || document.body;
-      return el.innerText.substring(0, 500);
+      const el = form || document.body;
+      return el.innerText
+        .replace(/[ \t]+/g, ' ')
+        .replace(/\n{3,}/g, '\n\n')
+        .substring(0, 800);
     });
-    log(`Page text (first 500 chars): ${bodyText.replace(/\s+/g, ' ')}`);
+    log(`Page text: ${bodyText}`);
   } catch (err) {
     log(`Could not read page: ${err.message}`);
   }
@@ -421,10 +429,31 @@ async function parseResults(page) {
   const result = { found: false, slots: [], summary: '' };
 
   try {
+    // Get the FULL body text — DOT page has deep nesting
     const bodyText = await page.evaluate(() => document.body.innerText);
-    result.summary = bodyText.substring(0, 2000);
+    result.summary = bodyText.substring(0, 3000);
 
-    // ── Check for "no slots" error messages ──
+    // Log a snippet for debugging
+    const compact = bodyText.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n');
+    log(`Body text preview: ${compact.substring(0, 400)}`);
+
+    // ── Check for DOT-specific error CSS class ──
+    const hasFeedbackError = await page.evaluate(() => {
+      const errEl = document.querySelector('.feedbackPanelERROR');
+      return errEl ? errEl.innerText.trim() : null;
+    });
+    if (hasFeedbackError) {
+      log(`  → DOT error message: "${hasFeedbackError.substring(0, 200)}"`);
+      if (NO_SLOTS_MARKERS.some((m) =>
+        hasFeedbackError.toLowerCase().includes(m.toLowerCase())
+      )) {
+        log('  → Page indicates NO slots available');
+        result.slots.push(`DOT: ${hasFeedbackError}`);
+        return result;
+      }
+    }
+
+    // ── Check for "no slots" text markers ──
     const hasNoSlotsMessage = NO_SLOTS_MARKERS.some((marker) =>
       bodyText.toLowerCase().includes(marker.toLowerCase())
     );
