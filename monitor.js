@@ -350,21 +350,25 @@ async function selectCannington(page) {
 async function setDateRange(page) {
   log('Setting date range...');
   try {
-    const today = new Date();
-    const sixMonths = new Date(today);
+    const now = new Date();
+    // Use tomorrow as "from" date (DOT requires a future date)
+    const tomorrow = new Date(now);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const sixMonths = new Date(tomorrow);
     sixMonths.setMonth(sixMonths.getMonth() + 6);
 
-    const fromDateStr = formatDateAU(today);
+    const fromDateStr = formatDateAU(tomorrow);
     const toDateStr = formatDateAU(sixMonths);
 
     log(`  Date range: ${fromDateStr} → ${toDateStr}`);
 
-    // Fill "from" date
+    // Fill "from" date — use fill() then dispatch change event for Wicket
     const fromInput = page.locator('#fromDateInput');
     if (await fromInput.isVisible({ timeout: 3000 }).catch(() => false)) {
       await fromInput.click();
-      await fromInput.fill('');
-      await fromInput.type(fromDateStr, { delay: 50 });
+      await fromInput.fill(fromDateStr);
+      // Trigger Wicket onchange AJAX
+      await fromInput.dispatchEvent('change');
       log('  From date entered — waiting for AJAX');
       await waitForWicketAjax(page);
     } else {
@@ -375,8 +379,8 @@ async function setDateRange(page) {
     const toInput = page.locator('#toDateInput');
     if (await toInput.isVisible({ timeout: 3000 }).catch(() => false)) {
       await toInput.click();
-      await toInput.fill('');
-      await toInput.type(toDateStr, { delay: 50 });
+      await toInput.fill(toDateStr);
+      await toInput.dispatchEvent('change');
       log('  To date entered — waiting for AJAX');
       await waitForWicketAjax(page);
     } else {
