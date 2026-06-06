@@ -261,8 +261,9 @@ async function selectMetroRegion(page) {
 async function selectCannington(page) {
   log('Selecting Cannington site...');
   try {
+    // Use attribute selector — Wicket IDs contain colons that break CSS
     const canningtonCheckbox = page.locator(
-      `#id2-searchBookingContainer:siteList_${CANNINGTON_SITE_CODE}`
+      `[id="id2-searchBookingContainer:siteList_${CANNINGTON_SITE_CODE}"]`
     );
 
     if (!(await canningtonCheckbox.isVisible({ timeout: 3000 }).catch(() => false))) {
