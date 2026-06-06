@@ -7,6 +7,11 @@ on:
     - cron: '*/10 * * * *'
   workflow_dispatch:
     # Manual trigger for testing
+    inputs:
+      test_notify:
+        description: 'Send a test Telegram notification'
+        type: boolean
+        default: false
 
 jobs:
   monitor:
@@ -31,6 +36,7 @@ jobs:
           DOT_COOKIES: ${{ secrets.DOT_COOKIES }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TEST_NOTIFY: ${{ github.event.inputs.test_notify || 'false' }}
         run: node monitor.js
 
       - name: Upload screenshots
