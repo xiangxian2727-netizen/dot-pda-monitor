@@ -105,6 +105,32 @@ function formatDateAU(date) {
 }
 
 /**
+ * Check if this run should send a daily heartbeat notification.
+ * Returns true once per day at ~9:00 AM Perth time (1:00 AM UTC).
+ * The cron fires every 10 minutes, so we narrow to the :00 slot.
+ */
+function shouldSendHeartbeat() {
+  const now = new Date();
+  const perthHour = parseInt(
+    new Intl.DateTimeFormat('en-AU', {
+      timeZone: 'Australia/Perth',
+      hour: '2-digit',
+      hour12: false,
+    }).format(now),
+    10
+  );
+  const perthMinute = parseInt(
+    new Intl.DateTimeFormat('en-AU', {
+      timeZone: 'Australia/Perth',
+      minute: '2-digit',
+    }).format(now),
+    10
+  );
+  // Fire only in the 9:00–9:09 AM Perth window (first cron tick)
+  return perthHour === 9 && perthMinute < 10;
+}
+
+/**
  * Send a message via Telegram Bot API.
  * Uses Node.js built-in fetch with retry support.
  */
@@ -678,6 +704,8 @@ async function monitor() {
   }
 
   try {
+    let notified = false; // Track if we already sent a Telegram message
+
     // ── Step 1: Navigate to PDA booking page ──
     log(`Navigating to: ${PDA_BOOKING_URL}`);
     await page.goto(PDA_BOOKING_URL, {
@@ -711,6 +739,7 @@ async function monitor() {
               '然后：<code>gh secret set DOT_COOKIES --body "$(cat cookies.json | base64)"</code>'
           );
           log('Sent session-expired notification via Telegram');
+          notified = true;
         } catch (err) {
           log(`Failed to send Telegram: ${err.message}`);
         }
@@ -728,6 +757,7 @@ async function monitor() {
               '请重新运行 login.js 更新 cookies，然后更新 GitHub Secrets。'
           );
           log('Sent login-redirect notification via Telegram');
+          notified = true;
         } catch (err) {
           log(`Failed to send Telegram: ${err.message}`);
         }
@@ -782,6 +812,7 @@ async function monitor() {
               const message = buildTelegramMessage(availability);
               await sendTelegram(telegramToken, telegramChatId, message);
               log('Sent availability notification via Telegram');
+              notified = true;
             } catch (err) {
               log(`Failed to send Telegram: ${err.message}`);
             }
@@ -813,6 +844,7 @@ async function monitor() {
                   '请在 Mac 上重新运行 login.js 并确保通过 DoTDirect 登录。\n\n' +
                   '流程: DoTDirect → Driver\'s License → PDA Bookings → Book PDA'
               );
+              notified = true;
             } catch (_) {}
           }
         }
@@ -829,6 +861,7 @@ async function monitor() {
           telegramChatId,
           `<b>❌ DOT Monitor 运行出错</b>\n\n<code>${err.message}</code>`
         );
+        notified = true;
       } catch (_) {
         // Don't fail if Telegram notification also fails
       }
@@ -837,6 +870,28 @@ async function monitor() {
     throw err;
   } finally {
     await browser.close();
+  }
+
+  // ── Daily heartbeat (only when no other notification was sent) ──
+  if (!notified && telegramToken && telegramChatId && shouldSendHeartbeat()) {
+    try {
+      const nowPerth = new Intl.DateTimeFormat('en-AU', {
+        timeZone: 'Australia/Perth',
+        dateStyle: 'full',
+        timeStyle: 'short',
+      }).format(new Date());
+      await sendTelegram(
+        telegramToken,
+        telegramChatId,
+        '<b>💚 DOT PDA Monitor 运行正常</b>\n\n' +
+          'Cannington 考场暂无空位。\n' +
+          '系统每 10 分钟自动检查，有空位会立即通知你。\n\n' +
+          `📅 检查时间: ${nowPerth} (Perth)`
+      );
+      log('Sent daily heartbeat via Telegram');
+    } catch (err) {
+      log(`Failed to send heartbeat: ${err.message}`);
+    }
   }
 
   log('═══ Monitor complete ═══');
