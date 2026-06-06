@@ -15,16 +15,12 @@
  */
 
 const { chromium } = require('playwright');
-const https = require('https');
 const fs = require('fs');
 const path = require('path');
 
 // ── Config ──────────────────────────────────────────────────────────
 const PDA_ENTRY_URL =
   'https://online.transport.wa.gov.au/pdabooking/manage/';
-
-const DOT_LOGIN_REDIRECT =
-  'https://www.transport.wa.gov.au/login-(to-dotdirect)';
 
 const CANNINGTON = 'Cannington';
 const LICENCE_CLASS = 'C'; // Manual
@@ -37,8 +33,15 @@ const SESSION_EXPIRED_MARKERS = [
   'Session Expired',
 ];
 
-const LOGIN_PAGE_MARKERS = [
-  'DoTDirect',
+// Login page URLs — we only flag as "login page" if we land on these URLs
+const LOGIN_PAGE_URLS = [
+  '/tso/selfservice/public/login',
+  '/login-(to-dotdirect)',
+  '/dotdirect/',
+];
+
+// JSF login form markers (must match BOTH to be a real login page)
+const LOGIN_FORM_MARKERS = [
   'loginForm:userId',
   'loginForm:password',
 ];
@@ -61,50 +64,52 @@ function ensureDir(dir) {
 
 /**
  * Send a message via Telegram Bot API.
- * Returns the response body as a string.
+ * Uses Node.js built-in fetch with retry support.
  */
-function sendTelegram(token, chatId, text) {
-  return new Promise((resolve, reject) => {
-    const body = JSON.stringify({
-      chat_id: chatId,
-      text,
-      parse_mode: 'HTML',
-      disable_web_page_preview: true,
-    });
-
-    const req = https.request(
-      {
-        hostname: 'api.telegram.org',
-        path: `/bot${token}/sendMessage`,
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(body),
-        },
-        timeout: 15000,
-      },
-      (res) => {
-        let data = '';
-        res.on('data', (chunk) => (data += chunk));
-        res.on('end', () => {
-          if (res.statusCode === 200) {
-            resolve(data);
-          } else {
-            reject(new Error(`Telegram API ${res.statusCode}: ${data}`));
-          }
-        });
-      }
-    );
-
-    req.on('error', reject);
-    req.on('timeout', () => {
-      req.destroy();
-      reject(new Error('Telegram API timeout'));
-    });
-
-    req.write(body);
-    req.end();
+async function sendTelegram(token, chatId, text) {
+  const url = `https://api.telegram.org/bot${token}/sendMessage`;
+  const body = JSON.stringify({
+    chat_id: chatId,
+    text,
+    parse_mode: 'HTML',
+    disable_web_page_preview: true,
   });
+
+  let lastError = null;
+
+  // Retry up to 2 times with increasing delays
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      if (attempt > 0) {
+        log(`Telegram retry attempt ${attempt + 1}...`);
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 30000);
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeout);
+
+      const data = await response.text();
+      if (response.status === 200) {
+        return data;
+      }
+      lastError = new Error(`Telegram API ${response.status}: ${data}`);
+    } catch (err) {
+      lastError = err;
+      // If it's a DNS/network error, log and retry
+      log(`Telegram attempt ${attempt + 1} failed: ${err.message}`);
+    }
+  }
+
+  throw lastError || new Error('Telegram send failed after retries');
 }
 
 // ── Session check ───────────────────────────────────────────────────
@@ -124,14 +129,28 @@ async function isSessionExpired(page) {
 }
 
 /**
- * Check if the current page is showing the login page.
+ * Check if the current page is a real login page (not a false positive
+ * from "DoTDirect" appearing in headers/footers).
+ *
+ * Uses two checks:
+ *   1. URL contains a known login path
+ *   2. Page HTML contains actual JSF login form fields
  */
 async function isLoginPage(page) {
   try {
+    const url = page.url();
+
+    // Quick URL check — if we're NOT on a known login URL, it's not a login page
+    const onLoginUrl = LOGIN_PAGE_URLS.some((path) => url.includes(path));
+    if (!onLoginUrl) {
+      return false;
+    }
+
+    // Confirm by checking for actual login form fields
     const html = await page.content();
-    return LOGIN_PAGE_MARKERS.some((marker) => html.includes(marker));
+    return LOGIN_FORM_MARKERS.every((marker) => html.includes(marker));
   } catch (_) {
-    return true;
+    return false;
   }
 }
 
