@@ -647,6 +647,27 @@ async function monitor() {
     log('TEST_NOTIFY mode — sending test Telegram message...');
     if (telegramToken && telegramChatId) {
       try {
+        // First, check what chats the bot can see (diagnostic)
+        log(`Configured Chat ID: ${telegramChatId}`);
+        try {
+          const updatesRes = await fetch(
+            `https://api.telegram.org/bot${telegramToken}/getUpdates?limit=5`
+          );
+          const updates = await updatesRes.json();
+          if (updates.ok && updates.result.length > 0) {
+            log('Recent chats the bot can see:');
+            for (const u of updates.result) {
+              const chat = u.message?.chat || u.channel_post?.chat || {};
+              log(`  → Chat ID: ${chat.id}, Type: ${chat.type}, Name: ${chat.first_name || chat.title || 'N/A'}`);
+            }
+          } else {
+            log('⚠️  Bot has NO recent messages — you need to send a message to your bot first!');
+            log('   Open Telegram → find your bot → send /start or "hello"');
+          }
+        } catch (e) {
+          log(`Diagnostic fetch failed: ${e.message}`);
+        }
+
         const nowPerth = new Intl.DateTimeFormat('en-AU', {
           timeZone: 'Australia/Perth',
           dateStyle: 'full',
