@@ -760,8 +760,9 @@ async function monitor() {
     }
   }
 
+  let notified = false; // Track if we already sent a Telegram message
+
   try {
-    let notified = false; // Track if we already sent a Telegram message
 
     // ── Step 1: Navigate to PDA booking page ──
     log(`Navigating to: ${PDA_BOOKING_URL}`);
