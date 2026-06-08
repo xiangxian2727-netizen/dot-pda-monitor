@@ -851,6 +851,19 @@ async function monitor() {
         // Take a screenshot after search
         await takeDebugScreenshot(page, 'search-results');
 
+        // Save full page HTML for debugging
+        try {
+          const html = await page.content();
+          const htmlPath = path.join(
+            SCREENSHOT_DIR,
+            `page-html-${new Date().toISOString().replace(/[:.]/g, '-')}.html`
+          );
+          fs.writeFileSync(htmlPath, html);
+          log(`Saved page HTML: ${htmlPath}`);
+        } catch (e) {
+          log(`Failed to save HTML: ${e.message}`);
+        }
+
         // Log page state after search
         await logPageSummary(page);
 
